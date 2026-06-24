@@ -357,7 +357,7 @@ type RegisterRv64IoFn = unsafe extern "C" fn(*const Rv64IoHostCallbacks);
 #[repr(C)]
 pub struct Rv64IPhantomCallbacks {
     pub hint_input: extern "C" fn(*mut c_void),
-    pub print_str: extern "C" fn(*mut c_void, u32, u32),
+    pub print_str: extern "C" fn(*mut c_void, u64, u32),
     pub hint_random: extern "C" fn(*mut c_void, u32),
     pub hint_stream_set: unsafe extern "C" fn(*mut c_void, *const u8, u32),
 }
@@ -365,9 +365,9 @@ pub struct Rv64IPhantomCallbacks {
 /// Must match the C `Rv64IoHostCallbacks` layout in `rv64io_callbacks.c`.
 #[repr(C)]
 pub struct Rv64IoHostCallbacks {
-    pub hint_storew: extern "C" fn(*mut c_void, u32),
-    pub hint_buffer: extern "C" fn(*mut c_void, u32, u32),
-    pub reveal: extern "C" fn(*mut c_void, u64, u32, u32),
+    pub hint_storew: extern "C" fn(*mut c_void, u64),
+    pub hint_buffer: extern "C" fn(*mut c_void, u64, u32),
+    pub reveal: extern "C" fn(*mut c_void, u64, u64, u32),
 }
 
 // ── Callback implementations ────────────────────────────────────────────────
@@ -391,7 +391,7 @@ pub extern "C" fn host_hint_input<F: PrimeField32>(ctx: *mut c_void) {
 }
 
 /// PrintStr: read UTF-8 from guest memory and print to stdout.
-pub extern "C" fn host_print_str<F: PrimeField32>(ctx: *mut c_void, ptr: u32, len: u32) {
+pub extern "C" fn host_print_str<F: PrimeField32>(ctx: *mut c_void, ptr: u64, len: u32) {
     let io = unsafe { &*(ctx as *const OpenVmIoState<'_, F>) };
     if len > 0 && !io.memory_ptr.is_null() {
         check_mem_bounds_range(ptr, len as usize);
@@ -415,7 +415,7 @@ pub extern "C" fn host_hint_random<F: PrimeField32>(ctx: *mut c_void, num_words:
 
 /// HINT_STOREW: pop one rv64 register-width word (8 bytes) from the hint stream
 /// and write it to guest memory at `dest_addr`.
-pub extern "C" fn host_hint_storew<F: PrimeField32>(ctx: *mut c_void, dest_addr: u32) {
+pub extern "C" fn host_hint_storew<F: PrimeField32>(ctx: *mut c_void, dest_addr: u64) {
     let io = unsafe { &mut *(ctx as *mut OpenVmIoState<'_, F>) };
     if io.hint_stream.len() < RV64_REGISTER_NUM_LIMBS || io.memory_ptr.is_null() {
         return;
@@ -438,7 +438,7 @@ pub extern "C" fn host_hint_storew<F: PrimeField32>(ctx: *mut c_void, dest_addr:
 /// and copy them as bytes into guest memory.
 pub extern "C" fn host_hint_buffer<F: PrimeField32>(
     ctx: *mut c_void,
-    dest_addr: u32,
+    dest_addr: u64,
     num_words: u32,
 ) {
     let io = unsafe { &mut *(ctx as *mut OpenVmIoState<'_, F>) };
@@ -459,7 +459,7 @@ pub extern "C" fn host_hint_buffer<F: PrimeField32>(
 pub extern "C" fn host_reveal<F: PrimeField32>(
     ctx: *mut c_void,
     src_val: u64,
-    ptr: u32,
+    ptr: u64,
     offset: u32,
 ) {
     let io = unsafe { &mut *(ctx as *mut OpenVmIoState<'_, F>) };
