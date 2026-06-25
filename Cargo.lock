@@ -5963,6 +5963,7 @@ dependencies = [
  "libloading 0.8.8",
  "memmap2",
  "metrics",
+ "nix",
  "openvm-circuit",
  "openvm-circuit-derive",
  "openvm-circuit-primitives",
@@ -9236,10 +9237,6 @@ dependencies = [
 [[package]]
 name = "rvr-state"
 version = "2.0.0-beta.2"
-dependencies = [
- "nix",
- "thiserror 1.0.69",
-]
 
 [[package]]
 name = "ryu"

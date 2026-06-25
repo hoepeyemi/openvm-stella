@@ -14,17 +14,27 @@ use crate::{
 };
 
 mod basic;
+#[cfg(all(unix, feature = "rvr", not(feature = "basic-memory")))]
+mod guarded;
 #[cfg(any(unix, windows))]
 mod memmap;
 mod paged_vec;
 
 #[cfg(not(any(unix, windows)))]
 pub use basic::*;
+#[cfg(all(unix, feature = "rvr", not(feature = "basic-memory")))]
+pub use guarded::*;
 #[cfg(any(unix, windows))]
 pub use memmap::*;
 pub use paged_vec::PagedVec;
 
-#[cfg(all(any(unix, windows), not(feature = "basic-memory")))]
+#[cfg(all(unix, not(feature = "basic-memory"), feature = "rvr"))]
+pub type MemoryBackend = guarded::GuardedMemory;
+#[cfg(all(
+    any(unix, windows),
+    not(feature = "basic-memory"),
+    not(all(unix, feature = "rvr"))
+))]
 pub type MemoryBackend = memmap::MmapMemory;
 #[cfg(any(not(any(unix, windows)), feature = "basic-memory"))]
 pub type MemoryBackend = basic::BasicMemory;

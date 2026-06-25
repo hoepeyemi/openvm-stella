@@ -47,6 +47,7 @@ dashmap.workspace = true
 cfg-if.workspace = true
 libloading = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
 abi_stable.workspace = true
 bytesize.workspace = true
 
@@ -106,6 +107,7 @@ rvr = [
     "dep:openvm-platform",
     "dep:libloading",
     "dep:tempfile",
+    "dep:nix",
     "openvm-circuit-derive/rvr",
 ]
 # Disable bounds checking in memory operations for performance
