@@ -37,7 +37,7 @@ impl ExtInstr for HintStoreWInstr {
     fn emit_c(&self, ctx: &mut dyn ExtEmitCtx) {
         let ptr = ctx.read_reg(self.ptr_reg);
         ctx.trace_mem_access(&ptr, RV64_MEMORY_AS);
-        ctx.extern_call("openvm_hint_storew", &[&ptr]);
+        ctx.extern_call_preserving_tracer("openvm_hint_storew", &[&ptr]);
     }
 
     fn clone_box(&self) -> Box<dyn ExtInstr> {
@@ -71,7 +71,7 @@ impl ExtInstr for HintBufferInstr {
         ctx.write_line(&format!("if ({n} > 0) {{"));
         ctx.trace_mem_access_u64_range(&ptr, &n, RV64_MEMORY_AS);
         ctx.write_line("}");
-        ctx.extern_call("openvm_hint_buffer", &[&ptr, &n]);
+        ctx.extern_call_preserving_tracer("openvm_hint_buffer", &[&ptr, &n]);
     }
 
     fn clone_box(&self) -> Box<dyn ExtInstr> {
@@ -109,7 +109,7 @@ impl ExtInstr for RevealInstr {
         ctx.trace_mem_access(&addr, AS_PUBLIC_VALUES);
         let offset = format!("0x{:08x}u", self.offset);
         let width = self.width.bytes().to_string();
-        ctx.extern_call("openvm_reveal", &[&src, &ptr, &offset, &width]);
+        ctx.extern_call_preserving_tracer("openvm_reveal", &[&src, &ptr, &offset, &width]);
     }
 
     fn clone_box(&self) -> Box<dyn ExtInstr> {
@@ -127,7 +127,7 @@ impl ExtInstr for HintInputInstr {
     }
 
     fn emit_c(&self, ctx: &mut dyn ExtEmitCtx) {
-        ctx.extern_call("openvm_hint_input", &[]);
+        ctx.extern_call_preserving_tracer("openvm_hint_input", &[]);
     }
 
     fn clone_box(&self) -> Box<dyn ExtInstr> {
@@ -150,7 +150,7 @@ impl ExtInstr for PrintStrInstr {
     fn emit_c(&self, ctx: &mut dyn ExtEmitCtx) {
         let ptr = ctx.read_reg_raw(self.ptr_reg);
         let len = ctx.read_reg_raw(self.len_reg);
-        ctx.extern_call("openvm_print_str", &[&ptr, &len]);
+        ctx.extern_call_preserving_tracer("openvm_print_str", &[&ptr, &len]);
     }
 
     fn clone_box(&self) -> Box<dyn ExtInstr> {
@@ -172,7 +172,7 @@ impl ExtInstr for HintRandomInstr {
 
     fn emit_c(&self, ctx: &mut dyn ExtEmitCtx) {
         let n = ctx.read_reg_raw(self.num_words_reg);
-        ctx.extern_call("openvm_hint_random", &[&n]);
+        ctx.extern_call_preserving_tracer("openvm_hint_random", &[&n]);
     }
 
     fn clone_box(&self) -> Box<dyn ExtInstr> {
