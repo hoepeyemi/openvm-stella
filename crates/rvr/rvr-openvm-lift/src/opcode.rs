@@ -4,7 +4,9 @@
 //! - RISC-V base instructions
 //! - System instructions: TERMINATE, PHANTOM, PUBLISH
 //! - System phantom sub-instructions: Nop, DebugPanic, CtStart, CtEnd
-//! - STORED/STOREW e=2 dispatch (normal memory store; e=3 falls through to extensions for REVEAL)
+//! - RV64 load/store instructions lift memory address space `e = 2`.
+//! - RV64 stores to public values address space `e = 3`, including REVEAL, are handled by
+//!   extensions.
 
 use openvm_instructions::{
     instruction::Instruction, riscv::RV64_REGISTER_NUM_LIMBS, LocalOpcode, SysPhantom, SystemOpcode,
@@ -15,12 +17,15 @@ use openvm_riscv_transpiler::{
     Rv64JalLuiOpcode, Rv64JalrOpcode, Rv64LoadStoreOpcode, ShiftOpcode, ShiftWOpcode,
 };
 use openvm_stark_backend::p3_field::PrimeField32;
-use rvr_openvm_ext_ffi_common::AS_PUBLIC_VALUES;
+use rvr_openvm_ext_ffi_common::{AS_MEMORY, AS_PUBLIC_VALUES, AS_REGISTER};
 use rvr_openvm_ir::{
     AluOp, BranchCond, Instr, InstrAt, LiftedInstr, MemWidth, MulDivOp, Terminator,
 };
 
-use crate::helpers::decode_imm_cg;
+use crate::{
+    helpers::{decode_imm_cg, sext32},
+    ExtensionRegistry,
+};
 
 /// Lift a single OpenVM instruction to the new IR types.
 ///
@@ -28,8 +33,8 @@ use crate::helpers::decode_imm_cg;
 /// the opcode, its `try_lift` is called.
 pub fn lift_instruction<F: PrimeField32>(
     insn: &Instruction<F>,
-    pc: u32,
-    extensions: &crate::ExtensionRegistry<F>,
+    pc: u64,
+    extensions: &ExtensionRegistry<F>,
 ) -> Option<LiftedInstr> {
     let opcode = insn.opcode.as_usize();
 
@@ -111,42 +116,49 @@ pub fn lift_instruction<F: PrimeField32>(
     //            STORED=0x214, STOREW=0x215, STOREH=0x216, STOREB=0x217,
     //            LOADB=0x218, LOADH=0x219, LOADW=0x21a
     if opcode == Rv64LoadStoreOpcode::LOADD.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Double, false));
+        return lift_load(insn, pc, MemWidth::Double, false);
     }
     if opcode == Rv64LoadStoreOpcode::LOADBU.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Byte, false));
+        return lift_load(insn, pc, MemWidth::Byte, false);
     }
     if opcode == Rv64LoadStoreOpcode::LOADHU.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Half, false));
+        return lift_load(insn, pc, MemWidth::Half, false);
     }
     if opcode == Rv64LoadStoreOpcode::LOADWU.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Word, false));
+        return lift_load(insn, pc, MemWidth::Word, false);
     }
     if opcode == Rv64LoadStoreOpcode::LOADB.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Byte, true));
+        return lift_load(insn, pc, MemWidth::Byte, true);
     }
     if opcode == Rv64LoadStoreOpcode::LOADH.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Half, true));
+        return lift_load(insn, pc, MemWidth::Half, true);
     }
     if opcode == Rv64LoadStoreOpcode::LOADW.global_opcode_usize() {
-        return Some(lift_load(insn, pc, MemWidth::Word, true));
+        return lift_load(insn, pc, MemWidth::Word, true);
     }
     if opcode == Rv64LoadStoreOpcode::STORED.global_opcode_usize() {
-        // e = RV64_MEMORY_AS is a normal store; e = AS_PUBLIC_VALUES is REVEAL,
-        // handled by `Rv64IoExtension`.
-        let addr_space = field_to_u32(insn.e);
-        if addr_space != AS_PUBLIC_VALUES {
-            return Some(lift_store(insn, pc, MemWidth::Double));
+        if let Some(lifted) = lift_store(insn, pc, MemWidth::Double) {
+            return Some(lifted);
         }
+        return lift_public_values_store(insn, pc, extensions);
     }
     if opcode == Rv64LoadStoreOpcode::STOREW.global_opcode_usize() {
-        return Some(lift_store(insn, pc, MemWidth::Word));
+        if let Some(lifted) = lift_store(insn, pc, MemWidth::Word) {
+            return Some(lifted);
+        }
+        return lift_public_values_store(insn, pc, extensions);
     }
     if opcode == Rv64LoadStoreOpcode::STOREH.global_opcode_usize() {
-        return Some(lift_store(insn, pc, MemWidth::Half));
+        if let Some(lifted) = lift_store(insn, pc, MemWidth::Half) {
+            return Some(lifted);
+        }
+        return lift_public_values_store(insn, pc, extensions);
     }
     if opcode == Rv64LoadStoreOpcode::STOREB.global_opcode_usize() {
-        return Some(lift_store(insn, pc, MemWidth::Byte));
+        if let Some(lifted) = lift_store(insn, pc, MemWidth::Byte) {
+            return Some(lifted);
+        }
+        return lift_public_values_store(insn, pc, extensions);
     }
 
     // BranchEqual: BEQ=0x220, BNE=0x221
@@ -274,7 +286,7 @@ fn sign_extend_12(val: u32) -> i32 {
 // ============= Instruction Lifters =============
 
 /// Helper to create a body instruction.
-pub fn body(pc: u32, instr: Instr) -> LiftedInstr {
+pub fn body(pc: u64, instr: Instr) -> LiftedInstr {
     LiftedInstr::Body(InstrAt {
         pc,
         instr,
@@ -283,7 +295,7 @@ pub fn body(pc: u32, instr: Instr) -> LiftedInstr {
 }
 
 /// Helper to create a terminator instruction.
-pub fn term(pc: u32, terminator: Terminator) -> LiftedInstr {
+pub fn term(pc: u64, terminator: Terminator) -> LiftedInstr {
     LiftedInstr::Term {
         pc,
         terminator,
@@ -292,7 +304,7 @@ pub fn term(pc: u32, terminator: Terminator) -> LiftedInstr {
 }
 
 /// Lift ALU instruction (R-type when e!=0, I-type when e==0).
-fn lift_alu<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp) -> LiftedInstr {
+fn lift_alu<F: PrimeField32>(insn: &Instruction<F>, pc: u64, e: u32, op: AluOp) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
 
@@ -315,7 +327,7 @@ fn lift_alu<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp) 
 }
 
 /// Lift shift instruction (R-type when e!=0, I-type shamt when e==0).
-fn lift_shift<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp) -> LiftedInstr {
+fn lift_shift<F: PrimeField32>(insn: &Instruction<F>, pc: u64, e: u32, op: AluOp) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
 
@@ -337,7 +349,7 @@ fn lift_shift<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp
 }
 
 /// Lift MUL/DIV/REM R-type instruction.
-fn lift_muldiv<F: PrimeField32>(insn: &Instruction<F>, pc: u32, op: MulDivOp) -> LiftedInstr {
+fn lift_muldiv<F: PrimeField32>(insn: &Instruction<F>, pc: u64, op: MulDivOp) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
     let rs2 = decode_reg(insn.c);
@@ -349,20 +361,46 @@ fn lift_muldiv<F: PrimeField32>(insn: &Instruction<F>, pc: u32, op: MulDivOp) ->
 
 /// Lift load instruction.
 /// OpenVM encoding: rd=a/4, rs1=b/4, imm low16=c, sign=g!=0
+#[inline]
+fn is_memory_instruction<F: PrimeField32>(insn: &Instruction<F>) -> bool {
+    field_to_u32(insn.d) == AS_REGISTER && field_to_u32(insn.e) == AS_MEMORY
+}
+
+#[inline]
+fn is_public_values_instruction<F: PrimeField32>(insn: &Instruction<F>) -> bool {
+    field_to_u32(insn.d) == AS_REGISTER && field_to_u32(insn.e) == AS_PUBLIC_VALUES
+}
+
+fn lift_public_values_store<F: PrimeField32>(
+    insn: &Instruction<F>,
+    pc: u64,
+    extensions: &ExtensionRegistry<F>,
+) -> Option<LiftedInstr> {
+    if is_public_values_instruction(insn) {
+        extensions.try_lift(insn, pc)
+    } else {
+        None
+    }
+}
+
 fn lift_load<F: PrimeField32>(
     insn: &Instruction<F>,
-    pc: u32,
+    pc: u64,
     width: MemWidth,
     signed: bool,
-) -> LiftedInstr {
+) -> Option<LiftedInstr> {
+    if !is_memory_instruction(insn) {
+        return None;
+    }
+
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
     let offset = decode_imm_cg(insn) as i16;
 
     if rd == 0 {
-        return body(pc, Instr::Nop);
+        return Some(body(pc, Instr::Nop));
     }
-    body(
+    Some(body(
         pc,
         Instr::Load {
             width,
@@ -371,17 +409,25 @@ fn lift_load<F: PrimeField32>(
             rs1,
             offset,
         },
-    )
+    ))
 }
 
 /// Lift store instruction.
 /// OpenVM encoding: rs2=a/4, rs1=b/4, imm low16=c, sign=g!=0
-fn lift_store<F: PrimeField32>(insn: &Instruction<F>, pc: u32, width: MemWidth) -> LiftedInstr {
+fn lift_store<F: PrimeField32>(
+    insn: &Instruction<F>,
+    pc: u64,
+    width: MemWidth,
+) -> Option<LiftedInstr> {
+    if !is_memory_instruction(insn) {
+        return None;
+    }
+
     let rs2 = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
     let offset = decode_imm_cg(insn) as i16;
 
-    body(
+    Some(body(
         pc,
         Instr::Store {
             width,
@@ -389,16 +435,16 @@ fn lift_store<F: PrimeField32>(insn: &Instruction<F>, pc: u32, width: MemWidth) 
             rs2,
             offset,
         },
-    )
+    ))
 }
 
 /// Lift branch instruction.
 /// OpenVM encoding: rs1=a/4, rs2=b/4, offset=c as signed (BabyBear modular)
-fn lift_branch<F: PrimeField32>(insn: &Instruction<F>, pc: u32, cond: BranchCond) -> LiftedInstr {
+fn lift_branch<F: PrimeField32>(insn: &Instruction<F>, pc: u64, cond: BranchCond) -> LiftedInstr {
     let rs1 = decode_reg(insn.a);
     let rs2 = decode_reg(insn.b);
     let offset = field_to_i32(insn.c);
-    let target = (pc as i64 + offset as i64) as u32;
+    let target = (pc as i64 + offset as i64) as u64;
 
     term(
         pc,
@@ -413,10 +459,10 @@ fn lift_branch<F: PrimeField32>(insn: &Instruction<F>, pc: u32, cond: BranchCond
 
 /// Lift JAL instruction.
 /// OpenVM encoding: rd=a/4, offset=c as signed (BabyBear modular)
-fn lift_jal<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
+fn lift_jal<F: PrimeField32>(insn: &Instruction<F>, pc: u64) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let offset = field_to_i32(insn.c);
-    let target = (pc as i64 + offset as i64) as u32;
+    let target = (pc as i64 + offset as i64) as u64;
 
     let link_rd = if rd != 0 { Some(rd) } else { None };
     term(pc, Terminator::Jump { link_rd, target })
@@ -424,7 +470,7 @@ fn lift_jal<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
 
 /// Lift JALR instruction.
 /// OpenVM encoding: rd=a/4, rs1=b/4, imm low16=c, sign=g!=0
-fn lift_jalr<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
+fn lift_jalr<F: PrimeField32>(insn: &Instruction<F>, pc: u64) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
     let imm = decode_imm_cg(insn) as i32;
@@ -443,7 +489,7 @@ fn lift_jalr<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
 
 /// Lift LUI instruction.
 /// OpenVM encoding: rd=a/4, upper20=c << 12
-fn lift_lui<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
+fn lift_lui<F: PrimeField32>(insn: &Instruction<F>, pc: u64) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let upper = field_to_u32(insn.c);
     let value = upper << 12;
@@ -456,11 +502,11 @@ fn lift_lui<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
 
 /// Lift AUIPC instruction.
 /// OpenVM encoding: rd=a/4, upper20 = c << 8 (from rrs.rs: c = (imm & 0xfffff000) >> 8)
-fn lift_auipc<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
+fn lift_auipc<F: PrimeField32>(insn: &Instruction<F>, pc: u64) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let shifted = field_to_u32(insn.c);
     let upper = shifted << 8; // reconstruct the upper 20 bits with low 12 zeros
-    let value = pc.wrapping_add(upper);
+    let value = pc.wrapping_add(sext32(upper));
 
     if rd == 0 {
         return body(pc, Instr::Nop);
@@ -470,7 +516,7 @@ fn lift_auipc<F: PrimeField32>(insn: &Instruction<F>, pc: u32) -> LiftedInstr {
 
 /// Lift W-suffix ALU instruction (R-type when e!=0, I-type when e==0).
 /// Result is the low 32 bits of the operation, sign-extended to 64 bits.
-fn lift_alu_w<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp) -> LiftedInstr {
+fn lift_alu_w<F: PrimeField32>(insn: &Instruction<F>, pc: u64, e: u32, op: AluOp) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
 
@@ -492,7 +538,7 @@ fn lift_alu_w<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp
 
 /// Lift W-suffix shift instruction (R-type when e!=0, I-type shamt when e==0).
 /// Shamt is 5-bit (W shifts operate on 32-bit values regardless of register width).
-fn lift_shift_w<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: AluOp) -> LiftedInstr {
+fn lift_shift_w<F: PrimeField32>(insn: &Instruction<F>, pc: u64, e: u32, op: AluOp) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
 
@@ -512,7 +558,7 @@ fn lift_shift_w<F: PrimeField32>(insn: &Instruction<F>, pc: u32, e: u32, op: Alu
 }
 
 /// Lift W-suffix MUL/DIV/REM R-type instruction.
-fn lift_muldiv_w<F: PrimeField32>(insn: &Instruction<F>, pc: u32, op: MulDivOp) -> LiftedInstr {
+fn lift_muldiv_w<F: PrimeField32>(insn: &Instruction<F>, pc: u64, op: MulDivOp) -> LiftedInstr {
     let rd = decode_reg(insn.a);
     let rs1 = decode_reg(insn.b);
     let rs2 = decode_reg(insn.c);
@@ -525,7 +571,7 @@ fn lift_muldiv_w<F: PrimeField32>(insn: &Instruction<F>, pc: u32, op: MulDivOp) 
 // ============= System / IO Instructions =============
 
 /// Lift a system PHANTOM sub-instruction.
-fn lift_phantom(sys: SysPhantom, pc: u32) -> LiftedInstr {
+fn lift_phantom(sys: SysPhantom, pc: u64) -> LiftedInstr {
     match sys {
         // Nop, CtStart, CtEnd — no-ops for execution
         SysPhantom::Nop | SysPhantom::CtStart | SysPhantom::CtEnd => body(pc, Instr::Nop),
@@ -537,5 +583,115 @@ fn lift_phantom(sys: SysPhantom, pc: u32) -> LiftedInstr {
                 message: "PHANTOM DebugPanic".to_string(),
             },
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openvm_instructions::{
+        instruction::Instruction, LocalOpcode, DEFERRAL_AS, PUBLIC_VALUES_AS,
+    };
+    use openvm_riscv_transpiler::{
+        Rv64AuipcOpcode,
+        Rv64LoadStoreOpcode::{
+            LOADB, LOADBU, LOADD, LOADH, LOADHU, LOADW, LOADWU, STOREB, STORED, STOREH, STOREW,
+        },
+    };
+    use p3_baby_bear::BabyBear;
+
+    use super::{lift_instruction, Instr, InstrAt, LiftedInstr, AS_MEMORY, AS_REGISTER};
+    use crate::ExtensionRegistry;
+
+    #[test]
+    fn load_store_address_space_domain() {
+        let extensions = ExtensionRegistry::<BabyBear>::new();
+
+        for opcode in [LOADD, LOADBU, LOADHU, LOADWU, LOADB, LOADH, LOADW] {
+            let inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [8, 16, 0, 1, DEFERRAL_AS as usize, 1, 0],
+            );
+
+            assert!(lift_instruction(&inst, 0x100, &extensions).is_none());
+        }
+
+        for opcode in [STORED, STOREW, STOREH, STOREB] {
+            let deferral_inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [8, 16, 0, 1, DEFERRAL_AS as usize, 1, 0],
+            );
+            assert!(lift_instruction(&deferral_inst, 0x100, &extensions).is_none());
+
+            let public_values_inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [8, 16, 0, 1, PUBLIC_VALUES_AS as usize, 1, 0],
+            );
+            assert!(lift_instruction(&public_values_inst, 0x100, &extensions).is_none());
+        }
+    }
+
+    #[test]
+    fn load_store_requires_register_destination_address_space() {
+        let extensions = ExtensionRegistry::<BabyBear>::new();
+
+        for opcode in [LOADD, LOADBU, LOADHU, LOADWU, LOADB, LOADH, LOADW] {
+            let inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [8, 16, 0, AS_MEMORY as usize, AS_MEMORY as usize, 1, 0],
+            );
+
+            assert!(lift_instruction(&inst, 0x100, &extensions).is_none());
+        }
+
+        for opcode in [STORED, STOREW, STOREH, STOREB] {
+            let memory_inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [8, 16, 0, AS_MEMORY as usize, AS_MEMORY as usize, 1, 0],
+            );
+            assert!(lift_instruction(&memory_inst, 0x100, &extensions).is_none());
+
+            let public_values_inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [
+                    8,
+                    16,
+                    0,
+                    AS_MEMORY as usize,
+                    PUBLIC_VALUES_AS as usize,
+                    1,
+                    0,
+                ],
+            );
+            assert!(lift_instruction(&public_values_inst, 0x100, &extensions).is_none());
+
+            let valid_memory_inst = Instruction::<BabyBear>::from_usize(
+                opcode.global_opcode(),
+                [8, 16, 0, AS_REGISTER as usize, AS_MEMORY as usize, 1, 0],
+            );
+            assert!(lift_instruction(&valid_memory_inst, 0x100, &extensions).is_some());
+        }
+    }
+
+    #[test]
+    fn auipc_lifts_sign_extended_64_bit_value() {
+        let pc = 0x1000;
+        let insn = Instruction::<BabyBear>::from_usize(
+            Rv64AuipcOpcode::AUIPC.global_opcode(),
+            [8, 0, 0x80_0000],
+        );
+
+        let lifted = lift_instruction(&insn, pc, &ExtensionRegistry::default());
+        match lifted {
+            Some(LiftedInstr::Body(InstrAt {
+                pc: lifted_pc,
+                instr: Instr::Auipc { rd, value },
+                ..
+            })) => {
+                assert_eq!(lifted_pc, pc);
+                assert_eq!(rd, 1);
+                assert_eq!(value, 0xffff_ffff_8000_1000);
+            }
+            other => panic!("unexpected lift: {other:?}"),
+        }
     }
 }

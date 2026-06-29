@@ -61,9 +61,17 @@ static __attribute__((always_inline)) inline void rv_set_status_at(
   rv_set_status(state, status, exit_code);
 }
 
-static __attribute__((always_inline)) inline uint32_t rv_dispatch_index(
-    uint32_t pc) {
+static __attribute__((always_inline)) inline uint64_t rv_dispatch_index(
+    uint64_t pc) {
   return (pc - RV_TEXT_START) >> 2;
+}
+
+/* True if pc names a 4-byte dispatch slot in the dense table. The alignment
+ * check prevents an unaligned pc from aliasing to a neighboring slot. */
+static __attribute__((always_inline)) inline bool rv_pc_is_dispatchable(
+    uint64_t pc) {
+  return pc >= RV_TEXT_START && pc <= RV_TEXT_END &&
+         ((pc - RV_TEXT_START) & 3ull) == 0;
 }
 
 /* ── Guest memory pointer ────────────────────────────────────────── */

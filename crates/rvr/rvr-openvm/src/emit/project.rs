@@ -105,7 +105,7 @@ pub struct CProject {
     /// `None` in pure mode (no chip metadata requested); must be set in metered modes.
     pub pc_to_chip: Option<Vec<TraceChipIndex>>,
     /// Program PC base (used to compute pc_to_chip index).
-    pub pc_base: u32,
+    pub pc_base: u64,
     /// Per-AIR widths for MeteredCost precomputation. Indexed by chip index.
     pub chip_widths: Option<Vec<u64>>,
     /// Compile with native debug info (`-g -fno-omit-frame-pointer`).
@@ -260,6 +260,25 @@ impl CProject {
         out
     }
 
+    fn trap_signature(&self) -> String {
+        self.block_signature("__attribute__((preserve_none, cold)) void", "rv_trap")
+    }
+
+    fn emit_trap_declaration(&self, out: &mut String) {
+        let trap_signature = self.trap_signature();
+        writeln!(
+            out,
+            "// Used when a computed jump or dispatch slot does not point to a real block."
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "// It takes the same arguments as a block so those register values can still be saved."
+        )
+        .unwrap();
+        writeln!(out, "{trap_signature};").unwrap();
+    }
+
     /// C argument list extracting hot regs from state:
     /// "state, state->regs[1], state->regs[2]".
     fn fn_args_from_state(&self) -> String {
@@ -299,11 +318,11 @@ impl CProject {
             .replace('\t', "\\t")
     }
 
-    fn block_end_pc(&self, block: &Block) -> u32 {
+    fn block_end_pc(&self, block: &Block) -> u64 {
         block.terminator_pc.saturating_add(4)
     }
 
-    fn dispatch_max_pc(blocks: &[Block], entry_point: u32, text_start: u32) -> u32 {
+    fn dispatch_max_pc(blocks: &[Block], entry_point: u64, text_start: u64) -> u64 {
         blocks
             .iter()
             .map(|b| b.start_pc)
@@ -312,7 +331,7 @@ impl CProject {
             .unwrap_or(text_start)
     }
 
-    fn dispatch_table_size(text_start: u32, text_end: u32) -> usize {
+    fn dispatch_table_size(text_start: u64, text_end: u64) -> usize {
         debug_assert!(text_end >= text_start);
         ((text_end - text_start) / 4 + 1) as usize
     }
@@ -339,7 +358,7 @@ impl CProject {
 
     /// Look up the chip index for a given PC. Must only be called in metered
     /// modes; panics if `pc_to_chip` is unset.
-    fn chip_idx_for_pc(&self, pc: u32) -> TraceChipIndex {
+    fn chip_idx_for_pc(&self, pc: u64) -> TraceChipIndex {
         let mapping = self
             .pc_to_chip
             .as_ref()
@@ -357,8 +376,8 @@ impl CProject {
     pub fn write_all<F: PrimeField32>(
         &self,
         blocks: &[Block],
-        entry_point: u32,
-        text_start: u32,
+        entry_point: u64,
+        text_start: u64,
         extensions: &ExtensionRegistry<F>,
     ) -> io::Result<()> {
         let text_end = Self::dispatch_max_pc(blocks, entry_point, text_start);
@@ -379,8 +398,8 @@ impl CProject {
 
     fn write_constants(
         &self,
-        text_start: u32,
-        text_end: u32,
+        text_start: u64,
+        text_end: u64,
         dispatch_table_size: usize,
     ) -> io::Result<()> {
         let h = constants_header(text_start, text_end, dispatch_table_size);
@@ -528,6 +547,7 @@ impl CProject {
             "typedef __attribute__((preserve_none)) void (*BlockFn)({typedef_params});"
         )
         .unwrap();
+        self.emit_trap_declaration(&mut h);
         writeln!(h, "extern BlockFn dispatch_table[RV_DISPATCH_TABLE_SIZE];").unwrap();
         writeln!(h).unwrap();
 
@@ -577,7 +597,7 @@ impl CProject {
         let num_partitions = blocks.len().div_ceil(self.blocks_per_partition);
 
         // Precompute valid block PCs for tail-call target validation.
-        let valid_blocks: HashSet<u32> = blocks.iter().map(|b| b.start_pc).collect();
+        let valid_blocks: HashSet<u64> = blocks.iter().map(|b| b.start_pc).collect();
 
         for part_idx in 0..num_partitions {
             let start = part_idx * self.blocks_per_partition;
@@ -601,7 +621,7 @@ impl CProject {
         Ok(())
     }
 
-    fn emit_block_function(&self, out: &mut String, block: &Block, valid_blocks: &HashSet<u32>) {
+    fn emit_block_function(&self, out: &mut String, block: &Block, valid_blocks: &HashSet<u64>) {
         let pc = block.start_pc;
         let end_pc = self.block_end_pc(block);
         let insn_count = block.insn_count();
@@ -707,7 +727,7 @@ impl CProject {
         writeln!(out).unwrap();
     }
 
-    fn emit_segment_checkpoint(&self, out: &mut String, pc: u32) {
+    fn emit_segment_checkpoint(&self, out: &mut String, pc: u64) {
         writeln!(
             out,
             "    MeteredSegmentCheckpointResult checkpoint = metered_segment_checkpoint(state, check_counter);"
@@ -732,13 +752,13 @@ impl CProject {
 
         writeln!(
             out,
-            "    uint8_t suspend_signal = begin_block(state, 0x{pc:08x}u, {insn_count}u);"
+            "    uint8_t suspend_signal = begin_block(state, 0x{pc:08x}ull, {insn_count}u);"
         )
         .unwrap();
         self.emit_instret_suspend_check(out, pc, insn_count);
     }
 
-    fn emit_metered_counter_check(&self, out: &mut String, pc: u32, insn_count: u32) {
+    fn emit_metered_counter_check(&self, out: &mut String, pc: u64, insn_count: u32) {
         let args = self.fn_args_from_params();
         writeln!(out, "    if (unlikely(check_counter < {insn_count}u)) {{").unwrap();
         writeln!(
@@ -749,7 +769,7 @@ impl CProject {
         writeln!(out, "    }}").unwrap();
     }
 
-    fn emit_instret_suspend_check(&self, out: &mut String, pc: u32, insn_count: u32) {
+    fn emit_instret_suspend_check(&self, out: &mut String, pc: u64, insn_count: u32) {
         debug_assert_ne!(
             self.tracer_mode,
             TracerMode::Metered,
@@ -757,19 +777,19 @@ impl CProject {
         );
         writeln!(
             out,
-            "    if (unlikely(should_suspend(state, 0x{pc:08x}u, {insn_count}u, suspend_signal))) {{"
+            "    if (unlikely(should_suspend(state, 0x{pc:08x}ull, {insn_count}u, suspend_signal))) {{"
         )
         .unwrap();
         self.emit_suspend_return(out, pc);
         writeln!(out, "    }}").unwrap();
     }
 
-    fn emit_suspend_return(&self, out: &mut String, pc: u32) {
+    fn emit_suspend_return(&self, out: &mut String, pc: u64) {
         let save = self.save_hot_regs_call();
         writeln!(out, "        {save}").unwrap();
         writeln!(
             out,
-            "        rv_set_status_at(state, 0x{pc:08x}u, OPENVM_EXEC_SUSPENDED, 0);"
+            "        rv_set_status_at(state, 0x{pc:08x}ull, OPENVM_EXEC_SUSPENDED, 0);"
         )
         .unwrap();
         writeln!(out, "        return;").unwrap();
@@ -791,7 +811,7 @@ impl CProject {
         }
 
         let mut chip_counts: BTreeMap<u32, u32> = BTreeMap::new();
-        let mut increment_chip_count = |pc: u32| match self.chip_idx_for_pc(pc) {
+        let mut increment_chip_count = |pc: u64| match self.chip_idx_for_pc(pc) {
             TraceChipIndex::Chip(chip) => *chip_counts.entry(chip.as_u32()).or_insert(0) += 1,
             TraceChipIndex::NoChip => {}
         };
@@ -831,7 +851,7 @@ impl CProject {
     fn emit_source_annotation(
         &self,
         out: &mut String,
-        pc: u32,
+        pc: u64,
         opname: &str,
         source_loc: Option<&SourceLoc>,
     ) {
@@ -856,8 +876,8 @@ impl CProject {
     fn write_dispatch(
         &self,
         blocks: &[Block],
-        entry_point: u32,
-        text_start: u32,
+        entry_point: u64,
+        text_start: u64,
     ) -> io::Result<()> {
         let name = &self.name;
         let mut src = String::with_capacity(16 * 1024);
@@ -868,11 +888,17 @@ impl CProject {
         writeln!(src).unwrap();
 
         let save = self.save_hot_regs_call();
-        // rv_trap — cold fallback for dispatch to non-block PCs.
-        let trap_signature = self.block_signature(
-            "static __attribute__((preserve_none, cold)) void",
-            "rv_trap",
-        );
+        let trap_signature = self.trap_signature();
+        writeln!(
+            src,
+            "// If a computed jump reaches an invalid PC, guest registers are still in"
+        )
+        .unwrap();
+        writeln!(
+            src,
+            "// this function's arguments. Save them back to state before trapping."
+        )
+        .unwrap();
         writeln!(src, "{trap_signature} {{").unwrap();
         writeln!(src, "    {save}").unwrap();
         if self.tracer_mode == TracerMode::Metered {
@@ -888,12 +914,12 @@ impl CProject {
         let table_size = Self::dispatch_table_size(text_start, max_pc);
 
         // Build block-start lookup.
-        let block_starts: std::collections::HashMap<u32, u32> =
+        let block_starts: std::collections::HashMap<u64, u64> =
             blocks.iter().map(|b| (b.start_pc, b.start_pc)).collect();
 
         writeln!(src, "BlockFn dispatch_table[RV_DISPATCH_TABLE_SIZE] = {{").unwrap();
         for i in 0..table_size {
-            let pc = text_start + (i as u32) * 4;
+            let pc = text_start + (i as u64) * 4;
             if block_starts.contains_key(&pc) {
                 writeln!(src, "    block_0x{pc:08x},").unwrap();
             } else {
@@ -911,17 +937,13 @@ impl CProject {
         .unwrap();
         writeln!(
             src,
-            "    if (state->pc < RV_TEXT_START || state->pc > RV_TEXT_END) {{"
+            "    if (unlikely(!rv_pc_is_dispatchable(state->pc))) {{"
         )
         .unwrap();
         writeln!(src, "        rv_trap({args_from_state});").unwrap();
         writeln!(src, "        return;").unwrap();
         writeln!(src, "    }}").unwrap();
-        writeln!(
-            src,
-            "    uint32_t idx = rv_dispatch_index((uint32_t)state->pc);"
-        )
-        .unwrap();
+        writeln!(src, "    uint64_t idx = rv_dispatch_index(state->pc);").unwrap();
         writeln!(src, "    dispatch_table[idx]({args_from_state});").unwrap();
         writeln!(src, "    return;").unwrap();
         writeln!(src, "}}").unwrap();

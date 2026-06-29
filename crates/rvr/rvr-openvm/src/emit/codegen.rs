@@ -1,5 +1,7 @@
 //! C code generation for IR instructions and terminators.
+use std::collections::HashSet;
 
+use openvm_instructions::program::DEFAULT_PC_STEP;
 use rvr_openvm_ir::*;
 
 use super::context::EmitContext;
@@ -38,7 +40,7 @@ pub fn emit_instr(ctx: &mut EmitContext, instr: &Instr) {
             ctx.write_reg(*rd, &sext32(*value));
         }
         Instr::Auipc { rd, value } => {
-            ctx.write_reg(*rd, &sext32(*value));
+            ctx.write_reg(*rd, &hex_u64(*value));
         }
         Instr::Load {
             width,
@@ -94,7 +96,7 @@ pub fn emit_instr(ctx: &mut EmitContext, instr: &Instr) {
 /// Context for terminator code generation (dispatch / tail-call info).
 pub struct TermCtx<'a> {
     /// Set of valid block start PCs (for direct tail calls).
-    pub valid_blocks: &'a std::collections::HashSet<u32>,
+    pub valid_blocks: &'a HashSet<u64>,
 }
 
 /// Emit C code for a terminator using tail calls between blocks.
@@ -102,8 +104,8 @@ pub struct TermCtx<'a> {
 /// Static targets use direct tail calls: `return block_0x...(args);`
 /// Dynamic targets go through the dispatch table: `return dispatch_table[idx](args);`
 /// Exit/suspend/trap save hot regs to state and return to `rv_execute`.
-pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &TermCtx) {
-    let next_pc = pc.wrapping_add(4);
+pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u64, tc: &TermCtx) {
+    let next_pc = pc.wrapping_add(u64::from(DEFAULT_PC_STEP));
     let args = ctx.tail_call_args();
     match term {
         Terminator::FallThrough => {
@@ -111,7 +113,7 @@ pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &T
         }
         Terminator::Jump { link_rd, target } => {
             if let Some(rd) = link_rd {
-                ctx.write_reg(*rd, &hex_u32(next_pc));
+                ctx.write_reg(*rd, &hex_u64(next_pc));
             }
             emit_tail_call(ctx, *target, &args, tc.valid_blocks);
         }
@@ -122,25 +124,33 @@ pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &T
             // Save base to a temporary when link_rd == rs1 to prevent
             // the link write from clobbering the jump target (e.g. jalr ra, ra, 0).
             let base = if link_rd.is_some_and(|rd| rd == *rs1) {
-                ctx.materialize_u32(&base)
+                ctx.materialize_u64(&base)
             } else {
                 base
             };
             if let Some(rd) = link_rd {
-                ctx.write_reg(*rd, &hex_u32(next_pc));
+                ctx.write_reg(*rd, &hex_u64(next_pc));
             }
             let imm_val = *imm;
             let next_pc = if imm_val == 0 {
-                ctx.materialize_u32(&format!("{base} & ~0x00000001u"))
+                ctx.materialize_u64(&format!("{base} & ~0x0000000000000001ull"))
             } else if imm_val > 0 {
-                ctx.materialize_u32(&format!(
-                    "({base} + {}) & ~0x00000001u",
-                    hex_u32(imm_val as u32)
+                ctx.materialize_u64(&format!(
+                    "({base} + {}) & ~0x0000000000000001ull",
+                    hex_u64(imm_val as u64)
                 ))
             } else {
-                let abs = (-(imm_val as i64)) as u32;
-                ctx.materialize_u32(&format!("({base} - {}) & ~0x00000001u", hex_u32(abs)))
+                let abs = (-(imm_val as i64)) as u64;
+                ctx.materialize_u64(&format!(
+                    "({base} - {}) & ~0x0000000000000001ull",
+                    hex_u64(abs)
+                ))
             };
+            ctx.write_line(&format!(
+                "if (unlikely(!rv_pc_is_dispatchable({next_pc}))) {{"
+            ));
+            ctx.write_line(&format!("  [[clang::musttail]] return rv_trap({args});"));
+            ctx.write_line("}");
             ctx.write_line(&format!("state->pc = {next_pc};"));
             ctx.write_line(&format!(
                 "[[clang::musttail]] return dispatch_table[rv_dispatch_index({next_pc})]({args});"
@@ -160,7 +170,7 @@ pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &T
             } else {
                 format!(
                     "[[clang::musttail]] return dispatch_table[rv_dispatch_index({})]({args});",
-                    hex_u32(*target)
+                    hex_u64(*target)
                 )
             };
             ctx.write_line(&format!("if ({cmp}) {{"));
@@ -172,7 +182,7 @@ pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &T
             ctx.sync_regs_to_state();
             ctx.write_line(&format!(
                 "rv_set_status_at(state, {}, OPENVM_EXEC_TERMINATED, {code});",
-                hex_u32(pc)
+                hex_u64(pc)
             ));
             ctx.write_line("return;");
         }
@@ -181,19 +191,19 @@ pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &T
             ctx.sync_regs_to_state();
             ctx.write_line(&format!(
                 "rv_set_status_at(state, {}, OPENVM_EXEC_TRAPPED, 0);",
-                hex_u32(pc)
+                hex_u64(pc)
             ));
             ctx.write_line(&format!("/* TRAP: {escaped} */"));
             ctx.write_line("return;");
         }
         Terminator::Extension(ext) => {
-            let branch_to = |target: u32| -> String {
+            let branch_to = |target: u64| -> String {
                 if tc.valid_blocks.contains(&target) {
                     format!("[[clang::musttail]] return block_0x{target:08x}({args});")
                 } else {
                     format!(
                         "[[clang::musttail]] return dispatch_table[rv_dispatch_index({})]({args});",
-                        hex_u32(target)
+                        hex_u64(target)
                     )
                 }
             };
@@ -204,12 +214,7 @@ pub fn emit_terminator(ctx: &mut EmitContext, term: &Terminator, pc: u32, tc: &T
 
 /// Emit a tail call to a known PC. Uses a direct call if the target is a valid
 /// block; otherwise falls back to the dispatch table.
-fn emit_tail_call(
-    ctx: &mut EmitContext,
-    target: u32,
-    args: &str,
-    valid_blocks: &std::collections::HashSet<u32>,
-) {
+fn emit_tail_call(ctx: &mut EmitContext, target: u64, args: &str, valid_blocks: &HashSet<u64>) {
     if valid_blocks.contains(&target) {
         ctx.write_line(&format!(
             "[[clang::musttail]] return block_0x{target:08x}({args});"
@@ -217,7 +222,7 @@ fn emit_tail_call(
     } else {
         ctx.write_line(&format!(
             "[[clang::musttail]] return dispatch_table[rv_dispatch_index({})]({args});",
-            hex_u32(target)
+            hex_u64(target)
         ));
     }
 }
@@ -284,8 +289,11 @@ fn imm_literal(imm: i32) -> String {
 
 /// Sign-extend a u32 value to a 64-bit C literal (uint64_t).
 fn sext32(value: u32) -> String {
-    let extended = value as i32 as i64 as u64;
-    format!("0x{extended:016x}ull")
+    hex_u64(value as i32 as i64 as u64)
+}
+
+fn hex_u64(value: u64) -> String {
+    format!("0x{value:016x}ull")
 }
 
 pub(super) fn hex_u32(value: u32) -> String {
