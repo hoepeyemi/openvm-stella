@@ -6,7 +6,10 @@
 use std::ffi::c_void;
 
 use halo2curves_axiom::{bls12_381, bn256, ff::PrimeField};
-use openvm_ecc_guest::{algebra::{field::FieldExtension, Field}, AffinePoint};
+use openvm_ecc_guest::{
+    algebra::{field::FieldExtension, Field},
+    AffinePoint,
+};
 use openvm_pairing_guest::{
     halo2curves_shims::{bls12_381::Bls12_381, bn254::Bn254},
     pairing::{FinalExp, MultiMillerLoop},
@@ -126,7 +129,9 @@ unsafe fn read_pairing_points<Fq: Field, Fq2: Field>(
 
 unsafe fn hint_bn254(state: *mut c_void, rs1_val: u32, rs2_val: u32) -> Option<Vec<u8>> {
     let (p, q) = read_pairing_points(
-        state, rs1_val, rs2_val,
+        state,
+        rs1_val,
+        rs2_val,
         BN254_FQ_BYTES,
         |s, ptr| unsafe { read_bn254_fq(s, ptr) },
         bn256::Fq2::new,
@@ -134,7 +139,9 @@ unsafe fn hint_bn254(state: *mut c_void, rs1_val: u32, rs2_val: u32) -> Option<V
     let f: bn256::Fq12 = Bn254::multi_miller_loop(&p, &q);
     let (c, u) = Bn254::final_exp_hint(&f);
     Some(
-        c.to_coeffs().into_iter().chain(u.to_coeffs())
+        c.to_coeffs()
+            .into_iter()
+            .chain(u.to_coeffs())
             .flat_map(|fp2| fp2.to_coeffs())
             .flat_map(|fp| fp.to_bytes())
             .collect(),
@@ -145,7 +152,9 @@ unsafe fn hint_bn254(state: *mut c_void, rs1_val: u32, rs2_val: u32) -> Option<V
 
 unsafe fn hint_bls12_381(state: *mut c_void, rs1_val: u32, rs2_val: u32) -> Option<Vec<u8>> {
     let (p, q) = read_pairing_points(
-        state, rs1_val, rs2_val,
+        state,
+        rs1_val,
+        rs2_val,
         BLS12_381_FQ_BYTES,
         |s, ptr| unsafe { read_bls12_381_fq(s, ptr) },
         |c0, c1| bls12_381::Fq2 { c0, c1 },
@@ -153,7 +162,9 @@ unsafe fn hint_bls12_381(state: *mut c_void, rs1_val: u32, rs2_val: u32) -> Opti
     let f: bls12_381::Fq12 = Bls12_381::multi_miller_loop(&p, &q);
     let (c, u) = Bls12_381::final_exp_hint(&f);
     Some(
-        c.to_coeffs().into_iter().chain(u.to_coeffs())
+        c.to_coeffs()
+            .into_iter()
+            .chain(u.to_coeffs())
             .flat_map(|fp2| fp2.to_coeffs())
             .flat_map(|fp| fp.to_bytes())
             .collect(),
