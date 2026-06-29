@@ -12,12 +12,12 @@
 
 use std::{ffi::c_void, marker::PhantomData};
 
-use halo2curves_axiom::ff::{Field, PrimeField};
+use halo2curves_axiom::ff::PrimeField;
 use num_bigint::BigUint;
 use num_traits::One;
 use rvr_openvm_ext_algebra_ffi_common::{
     exec_op, mod_inverse, read_bigint, read_bls12_381_fq, read_field_256, write_bigint,
-    write_bls12_381_fq, write_field_256, FieldArith,
+    write_bls12_381_fq, write_field_256, FieldArith, KnownFieldArith,
 };
 use rvr_openvm_ext_ffi_common::{
     ext_hint_stream_set, rd_mem_u64_range_wrapper, rd_mem_words_traced, trace_mem_access_range,
@@ -45,70 +45,22 @@ struct UnknownPrimeField {
 
 // ── KnownPrimeField impl (256-bit via generic bound) ────────────────────────
 
-impl<F: PrimeField<Repr = [u8; 32]>> FieldArith for KnownPrimeField<F> {
+impl<F: PrimeField<Repr = [u8; 32]>> KnownFieldArith for KnownPrimeField<F> {
     type Elem = F;
     #[inline(always)]
-    unsafe fn read_elem(&self, state: *mut c_void, ptr: u32) -> Self::Elem {
-        read_field_256(state, ptr)
-    }
+    unsafe fn read_elem(&self, state: *mut c_void, ptr: u32) -> F { read_field_256(state, ptr) }
     #[inline(always)]
-    unsafe fn write_elem(&self, state: *mut c_void, ptr: u32, val: &Self::Elem) {
-        write_field_256(state, ptr, val)
-    }
-    #[inline(always)]
-    fn add(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a + b
-    }
-    #[inline(always)]
-    fn sub(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a - b
-    }
-    #[inline(always)]
-    fn mul(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a * b
-    }
-    #[inline(always)]
-    fn div(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a * b.invert().unwrap()
-    }
-    #[inline(always)]
-    fn is_eq(&self, a: &Self::Elem, b: &Self::Elem) -> bool {
-        a == b
-    }
+    unsafe fn write_elem(&self, state: *mut c_void, ptr: u32, val: &F) { write_field_256(state, ptr, val) }
 }
 
 // ── KnownPrimeField impl (BLS12-381 Fq, 48 bytes) ──────────────────────────
 
-impl FieldArith for KnownPrimeField<Bls12381Fq> {
+impl KnownFieldArith for KnownPrimeField<Bls12381Fq> {
     type Elem = blstrs::Fp;
     #[inline(always)]
-    unsafe fn read_elem(&self, state: *mut c_void, ptr: u32) -> Self::Elem {
-        read_bls12_381_fq(state, ptr)
-    }
+    unsafe fn read_elem(&self, state: *mut c_void, ptr: u32) -> blstrs::Fp { read_bls12_381_fq(state, ptr) }
     #[inline(always)]
-    unsafe fn write_elem(&self, state: *mut c_void, ptr: u32, val: &Self::Elem) {
-        write_bls12_381_fq(state, ptr, val)
-    }
-    #[inline(always)]
-    fn add(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a + b
-    }
-    #[inline(always)]
-    fn sub(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a - b
-    }
-    #[inline(always)]
-    fn mul(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a * b
-    }
-    #[inline(always)]
-    fn div(&self, a: Self::Elem, b: Self::Elem) -> Self::Elem {
-        a * b.invert().unwrap()
-    }
-    #[inline(always)]
-    fn is_eq(&self, a: &Self::Elem, b: &Self::Elem) -> bool {
-        a == b
-    }
+    unsafe fn write_elem(&self, state: *mut c_void, ptr: u32, val: &blstrs::Fp) { write_bls12_381_fq(state, ptr, val) }
 }
 
 // ── UnknownPrimeField impl ──────────────────────────────────────────────────
