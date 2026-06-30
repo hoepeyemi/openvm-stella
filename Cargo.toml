@@ -10,7 +10,6 @@ license = "MIT OR Apache-2.0"
 [workspace]
 members = [
     "benchmarks/utils",
-    "stellar-proof-aggregator/contracts/stellar-verifier",
     "benchmarks/execute",
     "benchmarks/prove",
     "crates/prof",
