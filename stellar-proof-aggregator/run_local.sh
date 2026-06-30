@@ -115,8 +115,18 @@ section "STEP 3/7 — Install cargo-nextest"
 if command -v cargo-nextest &>/dev/null; then
     ok "cargo-nextest already installed: $(cargo nextest --version)"
 else
-    log "Installing cargo-nextest..."
-    run cargo install cargo-nextest --locked
+    log "Installing cargo-nextest (picking version compatible with active rustc)..."
+    # Detect active rustc minor version and pick the newest compatible release.
+    # cargo-nextest 0.9.129+ requires rustc 1.91; 0.9.128 supports 1.89+.
+    RUSTC_MINOR=$(rustc --version | grep -oP '1\.\K[0-9]+')
+    log "Active rustc minor version: 1.${RUSTC_MINOR}"
+    if [[ "$RUSTC_MINOR" -ge 91 ]]; then
+        NEXTEST_VER="0.9.138"
+    else
+        NEXTEST_VER="0.9.128"
+    fi
+    log "Installing cargo-nextest $NEXTEST_VER..."
+    run cargo install cargo-nextest --version "$NEXTEST_VER" --locked
     ok "cargo-nextest installed: $(cargo nextest --version)"
 fi
 
