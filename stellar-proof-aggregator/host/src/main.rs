@@ -84,6 +84,7 @@ fn build_stdin(witnesses: &[BalanceWitness]) -> StdIn {
 
 fn expected_aggregate_hash(witnesses: &[BalanceWitness]) -> [u8; 32] {
     let mut h = Sha256::new();
+    h.update(&(witnesses.len() as u32).to_le_bytes());
     for w in witnesses {
         h.update(&w.commitment);
     }
@@ -149,13 +150,12 @@ fn main() -> Result<()> {
     let t = Instant::now();
     let stdin = build_stdin(&witnesses);
     let raw_pv = sdk.execute(elf.clone(), stdin.clone())?;
-    let pub_inputs = AggregatedPublicInputs::from_public_values(&raw_pv)?;
+    let pub_inputs = AggregatedPublicInputs::from_public_values(&raw_pv, n as u32)?;
 
     assert_eq!(
         pub_inputs.aggregate_hash, expected_hash,
         "aggregate hash mismatch — guest / host commitment formula diverge"
     );
-    assert_eq!(pub_inputs.n_proofs, n as u32);
 
     println!("      Execution OK in {:.2}s", t.elapsed().as_secs_f64());
     println!(

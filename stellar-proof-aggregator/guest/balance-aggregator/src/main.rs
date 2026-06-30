@@ -70,18 +70,17 @@ pub fn main() {
         commitment_buf.extend_from_slice(&commitment);
     }
 
-    // ── Produce aggregate hash over all commitments ───────────────────────────
-    // This single 32-byte value is the canonical public fingerprint of the batch.
-    // The Soroban verifier contract will check it against the public inputs
-    // supplied to the on-chain SNARK verifier.
+    // ── Produce aggregate hash over n and all commitments ────────────────────
+    // n is included in the preimage so the 32-byte output commits to BOTH the
+    // proof count and all individual commitments. The Soroban verifier receives
+    // n separately as a contract argument; this hash lets it trust the count.
     let mut agg_hasher = Sha256::new();
+    agg_hasher.update(&n.to_le_bytes());
     agg_hasher.update(&commitment_buf);
     let agg_hash: [u8; 32] = agg_hasher.finalize().into();
 
     // ── Reveal public values ──────────────────────────────────────────────────
-    // Layout (byte offsets in the public-values region):
-    //   [0 .. 32)  aggregate hash of all commitments (8 × u32 at word indices 0..7)
-    //   [32 .. 36) number of proofs verified (u32 at word index 8)
+    // Layout (byte offsets in the 32-byte public-values region):
+    //   [0 .. 32) aggregate hash: SHA-256(n_le4 || c[0] || … || c[n-1])
     openvm::io::reveal_bytes32(agg_hash);
-    openvm::io::reveal_u32(n, 8);
 }

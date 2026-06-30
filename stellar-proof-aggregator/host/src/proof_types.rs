@@ -27,12 +27,13 @@ impl AggregatedPublicInputs {
     /// Decode from the raw public-values byte slice returned by OpenVM execute/prove.
     ///
     /// Layout (as written by the guest):
-    ///   bytes [0..32)  → aggregate_hash (8 × u32 via reveal_bytes32)
-    ///   bytes [32..36) → n_proofs (u32 via reveal_u32 at word-index 8)
-    pub fn from_public_values(pv: &[u8]) -> eyre::Result<Self> {
-        eyre::ensure!(pv.len() >= 36, "public values too short ({})", pv.len());
+    ///   bytes [0..32) → aggregate_hash: SHA-256(n_le4 || c[0] || … || c[n-1])
+    ///
+    /// n_proofs is not stored in the public-values region (the 32-byte budget is
+    /// fully consumed by the hash). Pass the known batch size from the caller.
+    pub fn from_public_values(pv: &[u8], n_proofs: u32) -> eyre::Result<Self> {
+        eyre::ensure!(pv.len() >= 32, "public values too short ({})", pv.len());
         let aggregate_hash = pv[0..32].try_into().unwrap();
-        let n_proofs = u32::from_le_bytes(pv[32..36].try_into().unwrap());
         Ok(Self { aggregate_hash, n_proofs })
     }
 }

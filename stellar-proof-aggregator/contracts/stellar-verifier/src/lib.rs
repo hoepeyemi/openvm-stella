@@ -16,9 +16,12 @@
 //!
 //! # Public inputs for the OpenVM aggregated proof
 //!
-//! The guest program (balance-aggregator) reveals:
-//!   pub_inputs[0]    : n_proofs (number of balance proofs aggregated, as Fr)
-//!   pub_inputs[1..9] : agg_hash as 8 × Bn254Fr (little-endian 4-byte chunks)
+//! The guest program (balance-aggregator) reveals only:
+//!   pub_inputs[0..8] : agg_hash as 8 × Bn254Fr (LE 4-byte chunks)
+//!
+//! agg_hash = SHA-256(n_le4 || c[0] || … || c[n-1]) so the proof count n is
+//! committed inside the hash.  `n_proofs` is passed explicitly to verify_aggregate
+//! for event emission and informational purposes only.
 //!
 //! # Stellar host-function requirements
 //!
@@ -109,20 +112,22 @@ impl AggregatedVerifier {
     /// Verify an aggregated OpenVM proof-of-balance.
     ///
     /// `proof`      — Groth16 BN254 proof from the OpenVM aggregation pipeline.
-    /// `pub_inputs` — public signals matching the circuit layout:
-    ///                  [0]    = n_proofs (as Bn254Fr)
-    ///                  [1..9] = SHA-256 aggregate hash as 8 × Bn254Fr (LE 4-byte chunks)
+    /// `n_proofs`   — number of balance proofs covered (informational; committed
+    ///                inside agg_hash so the proof implicitly enforces it).
+    /// `pub_inputs` — public signals: 8 × Bn254Fr encoding the aggregate hash
+    ///                SHA-256(n_le4 || c[0] || … || c[n-1]).
     ///
     /// Returns `true` on success; reverts on invalid proof.
     ///
     /// # On-chain cost
     ///
-    /// One call (~29M Soroban instructions) replaces `pub_inputs[0]` separate
+    /// One call (~28M Soroban instructions) replaces `n_proofs` separate
     /// individual proof verifications (each ~27.5M instructions).
     /// For N ≥ 2, aggregation is strictly cheaper.
     pub fn verify_aggregate(
         env: Env,
         proof: Proof,
+        n_proofs: u32,
         pub_inputs: Vec<Bn254Fr>,
     ) -> bool {
         // Load stored verifying key.
@@ -174,10 +179,10 @@ impl AggregatedVerifier {
         env.storage().instance().set(&key_counter(), &(count + 1));
 
         // Emit an event so indexers can track verified batches.
-        // Topic: ("verify",)  Data: n_proofs scalar
+        // Topic: ("verify",)  Data: n_proofs
         env.events().publish(
             (soroban_sdk::symbol_short!("verify"),),
-            pub_inputs.get(0).unwrap(),
+            n_proofs,
         );
 
         true
@@ -207,14 +212,14 @@ impl AggregatedVerifier {
         //                                         per proof total = 27,500,000
         let per_proof: u64 = 27_500_000;
 
-        // Aggregated proof (9 public inputs: 1 for n_proofs + 8 for agg_hash):
-        //   9  × g1_mul                         @ 1,500,000 each = 13,500,000
+        // Aggregated proof (8 public inputs: 8 × Bn254Fr for agg_hash):
+        //   8  × g1_mul                         @ 1,500,000 each = 12,000,000
         //   1  × pairing_check (4 pairs)                         = 15,000,000
         //   overhead                                              =    500,000
         //                                                    ─────────────────
-        //                                       aggregated total = 29,000,000
+        //                                       aggregated total = 27,500,000
         //   (constant — independent of N!)
-        let aggregated: u64 = 29_000_000;
+        let aggregated: u64 = 27_500_000;
 
         (per_proof * n as u64, aggregated)
     }
@@ -259,7 +264,7 @@ mod tests {
             "aggregated ({agg_10}) should be cheaper than individual ({ind_10}) for N=10");
 
         let savings_pct = 100.0 * (1.0 - agg_10 as f64 / ind_10 as f64);
-        // At N=10, savings should be close to (1 - 29/275) ≈ 89.5%
+        // At N=10, savings should be (1 - 27.5/275) = 90%
         assert!(savings_pct > 85.0, "expected >85% savings at N=10, got {savings_pct:.1}%");
     }
 

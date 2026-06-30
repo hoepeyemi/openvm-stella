@@ -30,18 +30,16 @@ pub mod cost {
 /// and one aggregated OpenVM proof.
 ///
 /// Public inputs for the aggregated proof:
-///   - n_proofs (1 × u32 → 1 scalar)
 ///   - aggregate_hash (32 bytes → 8 × Bn254Fr scalars)
-///   Total: 9 public inputs
+///   Total: 8 public inputs
 pub fn print_cost_comparison(n: u32) {
-    // Individual: each proof has 1 public input (its own commitment, 32-byte hash).
-    // We represent it as 8 × Bn254Fr for the full hash → 8 public inputs each.
-    let per_proof_pub_inputs: u32 = 8; // 32-byte commitment as 8 × Bn254Fr
+    // Individual: each proof has 8 public inputs (its own commitment as 8 × Bn254Fr).
+    let per_proof_pub_inputs: u32 = 8;
     let individual_total =
         cost::groth16_verify_cost(per_proof_pub_inputs) * n as u64;
 
-    // Aggregated: ONE proof for all N, with 9 public inputs (n + 8-element hash).
-    let aggregated_pub_inputs: u32 = 9; // 1 (n_proofs) + 8 (agg_hash)
+    // Aggregated: ONE proof for all N, with 8 public inputs (agg_hash as 8 × Bn254Fr).
+    let aggregated_pub_inputs: u32 = 8;
     let aggregated_total = cost::groth16_verify_cost(aggregated_pub_inputs);
 
     let savings_pct =
@@ -58,7 +56,7 @@ pub fn print_cost_comparison(n: u32) {
     println!("├─────────────────────────────────────────────────────────────┤");
     println!("│  With OpenVM aggregation (1 verify_aggregate call)          │");
     println!("│    Soroban instructions : {:>14}                      │", aggregated_total);
-    println!("│    G1 multiplications   : {:>14}                      │", 9u32);
+    println!("│    G1 multiplications   : {:>14}                      │", 8u32);
     println!("│    Pairing checks       : {:>14}                      │", 1u32);
     println!("├─────────────────────────────────────────────────────────────┤");
     println!("│  Savings: {savings_pct:>5.1}% — {multiplier:>4.1}× cheaper on-chain                 │");
@@ -88,15 +86,15 @@ pub fn print_stellar_submission(
     println!("=== Stellar Submission (verify_aggregate call) ===");
     println!();
     println!("  Contract : StellarAggregatedVerifier");
-    println!("  Function : verify_aggregate(proof, vk, pub_inputs)");
+    println!("  Function : verify_aggregate(proof, n_proofs, pub_inputs)");
     println!();
     println!("  Public inputs supplied to the Soroban contract:");
     println!(
-        "    pub_inputs[0]  = n_proofs = {}",
+        "    n_proofs         = {} (contract arg, committed inside agg_hash)",
         public_inputs.n_proofs
     );
     println!(
-        "    pub_inputs[1..9] = agg_hash = 0x{}",
+        "    pub_inputs[0..8] = agg_hash = 0x{}",
         hex::encode(public_inputs.aggregate_hash)
     );
     println!();
@@ -107,7 +105,7 @@ pub fn print_stellar_submission(
     println!();
     println!("  Verification equation on Stellar:");
     println!("    e(-A, B) · e(α, β) · e(vk_x, γ) · e(C, δ) == 1");
-    println!("    where vk_x = IC[0] + n_proofs·IC[1] + agg_hash·IC[2..10]");
+    println!("    where vk_x = IC[0] + Σ_i agg_hash_chunk[i]·IC[i+1]");
     println!();
     println!("  This single transaction replaces {} separate on-chain verifications.", public_inputs.n_proofs);
     println!();
