@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "balance-aggregator-guest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "balance-aggregator"
+path = "src/main.rs"
+
+[dependencies]
+openvm = { path = "../../../crates/toolchain/openvm", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive"] }

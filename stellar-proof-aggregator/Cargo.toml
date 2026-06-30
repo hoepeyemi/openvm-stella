@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "host",
+]
+# NOTE: guest/balance-aggregator and contracts/stellar-verifier are separate
+# workspaces (they have conflicting toolchain/target requirements):
+#   guest/       → compiles to RISC-V (zkvm target) via OpenVM toolchain
+#   contracts/   → compiles to Wasm32 (soroban target) via Stellar toolchain
+#
+# Build them separately:
+#   cd guest/balance-aggregator  && cargo build --release
+#   cd contracts/stellar-verifier && cargo build --target wasm32-unknown-unknown --release
+#   cd ../..                      && cargo run -p stellar-aggregator-host -- --n 10
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"

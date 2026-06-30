@@ -1,0 +1,96 @@
+name: OpenVM CLI Tests
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "crates/circuits/primitives/**"
+      - "crates/vm/**"
+      - "crates/toolchain/**"
+      - "crates/sdk/**"
+      - "crates/cli/**"
+      - "examples/**"
+      - "Cargo.toml"
+      - ".github/workflows/cli.yml"
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      use_local_openvm:
+        description: "Test cargo openvm init using local patch"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow_ref }}-cli-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  OPENVM_FAST_TEST: "1"
+
+jobs:
+  app-level-cli:
+    runs-on:
+      - runs-on=${{ github.run_id }}/volume=80gb/runner=64cpu-linux-x64/image=ubuntu24-full-x64/extras=s3-cache
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Install solc # svm should support arm64 linux
+        run: |
+          (hash svm 2>/dev/null || cargo install --locked --version 0.2.23 svm-rs) && svm install 0.8.19 && solc --version
+
+      - name: Install cargo-openvm
+        working-directory: crates/cli
+        run: |
+          cargo install --force --locked --path .
+
+      - name: Build and run book examples
+        working-directory: examples
+        run: |
+          set -e
+          for dir in */; do
+            if [ -f "${dir}Cargo.toml" ]; then
+              echo "Building ${dir%/}"
+              cd "$dir"
+              cargo openvm build
+              cargo openvm run
+              cd ..
+            fi
+          done
+
+      - name: check build consistency
+        working-directory: examples/ecc
+        run: |
+          cargo openvm build
+          mv target/openvm/release/ecc-example.vmexe app1.vmexe
+          cargo openvm build
+          cmp app1.vmexe target/openvm/release/ecc-example.vmexe || (echo "Build is not deterministic!" && exit 1)
+
+      - name: Run app-level CLI commands
+        working-directory: crates/cli
+        run: |
+          export RUST_BACKTRACE=1
+          cargo openvm keygen --config ./example/app_config.toml --output-dir .
+
+      - name: Set USE_LOCAL_OPENVM environment variable
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.use_local_openvm }}" == "false" ]]; then
+            echo "USE_LOCAL_OPENVM=0" >> $GITHUB_ENV
+          else
+            echo "USE_LOCAL_OPENVM=1" >> $GITHUB_ENV
+          fi
+
+      - name: Run CLI tests
+        working-directory: crates/cli
+        run: |
+          export SKIP_INSTALL=1
+          cargo nextest run --cargo-profile=fast --test-threads=1

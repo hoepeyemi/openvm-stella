@@ -1,0 +1,20 @@
+[package]
+name = "openvm-circuit-derive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Procedural macros for OpenVM circuits."
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["parsing", "full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+itertools = { workspace = true }
+
+[features]
+aot = []
+tco = []

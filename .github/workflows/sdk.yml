@@ -1,0 +1,98 @@
+name: OpenVM SDK Tests
+
+on:
+  workflow_call:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "crates/circuits/primitives/**"
+      - "crates/vm/**"
+      - "crates/toolchain/**"
+      - "crates/sdk/**"
+      - "Cargo.toml"
+      - ".github/workflows/sdk.yml"
+
+concurrency:
+  group: ${{ github.workflow_ref }}-sdk-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  OPENVM_FAST_TEST: "1"
+
+jobs:
+  tests:
+    strategy:
+      matrix:
+        mode: ["default", "ignored", "aot"]
+
+    runs-on:
+      - runs-on=${{ github.run_id }}-sdk-${{ github.run_attempt }}-${{ strategy.job-index }}/family=m7a.24xlarge/image=ubuntu24-full-x64/volume=80gb/extras=s3-cache
+
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Install solc # svm should support arm64 linux
+        run: (hash svm 2>/dev/null || cargo install --locked --version 0.2.23 svm-rs) && svm install 0.8.19 && solc --version
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.0
+
+      - name: Install architecture specific tools
+        run: |
+          source ci/scripts/utils.sh
+          install_s5cmd
+
+      - name: Setup halo2
+        working-directory: crates/sdk
+        run: |
+          bash ../../extensions/native/recursion/trusted_setup_s3.sh
+
+      - name: Run openvm-sdk contracts/ tests
+        if: ${{ matrix.mode == 'default' }}
+        working-directory: crates/sdk/contracts
+        run: |
+          forge fmt --check
+          forge build --sizes
+          forge test
+
+      - name: Check IOpenVmHalo2Verifier.sol abi correctness
+        if: ${{ matrix.mode == 'default' }}
+        working-directory: crates/sdk/contracts
+        run: |
+          forge build
+          jq -S '.abi' ./out/IOpenVmHalo2Verifier.sol/IOpenVmHalo2Verifier.json > compiled_abi.json
+          jq -S . ./abi/IOpenVmHalo2Verifier.json > expected_abi_sorted.json
+          diff -u expected_abi_sorted.json compiled_abi.json
+
+      - name: Run openvm-sdk crate tests
+        if: ${{ matrix.mode == 'default' }}
+        working-directory: crates/sdk
+        run: |
+          export RUST_BACKTRACE=1
+          export RUST_MIN_STACK=8388608
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo nextest run --release --features parallel,evm-verify
+
+      - name: Run openvm-sdk crate tests (AOT)
+        if: ${{ matrix.mode == 'aot' }}
+        working-directory: crates/sdk
+        run: |
+          export RUST_BACKTRACE=1
+          export RUST_MIN_STACK=8388608
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo nextest run --release --features parallel,evm-verify,aot
+
+      - name: Run ignored tests
+        if: ${{ matrix.mode == 'ignored' }}
+        working-directory: crates/sdk
+        # if: ${{ github.event_name == 'push' }}
+        run: |
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo nextest run --release --features parallel,evm-verify --run-ignored=only test_static_verifier_custom_pv_handler
