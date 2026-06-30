@@ -35,11 +35,15 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype,
-    crypto::bn254::{Bn254Fr, Bn254G1Affine, Bn254G2Affine},
-    vec, Address, Env, Vec,
+    contract, contracterror, contractimpl, contracttype,
+    Address, BytesN, Env, Vec,
 };
-
+// soroban-sdk v22 does not expose BN254 host-function bindings yet. Keep the
+// contract ABI byte-shaped so the WASM builds today, and replace these aliases
+// with SDK-native BN254 types when Stellar exposes them in soroban-sdk.
+pub type Bn254Fr = BytesN<32>;
+pub type Bn254G1Affine = BytesN<64>;
+pub type Bn254G2Affine = BytesN<128>;
 // ── Contract types ────────────────────────────────────────────────────────────
 
 /// A Groth16 BN254 proof.
@@ -71,13 +75,15 @@ pub struct VerifyingKey {
 }
 
 /// Contract error codes.
-#[contracttype]
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum VerifierError {
     InvalidProof              = 1,
     PublicInputLengthMismatch = 2,
     Unauthorized              = 3,
     VkNotSet                  = 4,
+    UnsupportedHostFunction   = 5,
 }
 
 // ── Storage key symbols ───────────────────────────────────────────────────────
@@ -144,48 +150,11 @@ impl AggregatedVerifier {
             soroban_sdk::panic_with_error!(&env, VerifierError::PublicInputLengthMismatch);
         }
 
-        let bn254 = env.crypto().bn254();
-
-        // ── vk_x = IC[0] + Σ_i pub_inputs[i] · IC[i+1] ──────────────────────
-        // This is the prover-supplied input accumulator used in the pairing check.
-        // With Protocol 26 CAP-0080, this could be a single g1_msm call.
-        let mut vk_x: Bn254G1Affine = vk.ic.get(0).unwrap();
-        for i in 0..pub_inputs.len() {
-            let ic_next = vk.ic.get(i + 1).unwrap();
-            let scalar  = pub_inputs.get(i).unwrap();
-            let term    = bn254.g1_mul(&ic_next, &scalar);
-            vk_x = bn254.g1_add(&vk_x, &term);
-        }
-
-        // ── Groth16 pairing check ─────────────────────────────────────────────
-        // e(-A, B) · e(α, β) · e(vk_x, γ) · e(C, δ) == 1_{GT}
-        //
-        // Equivalently: e(−A, B) · e(α, β) · e(vk_x, γ) · e(C, δ) = 1.
-        // We negate A using the Neg impl provided by soroban-sdk for G1 points.
-        let neg_a = -proof.a;
-
-        // Pack (g1, g2) pairs for the multi-pairing check.
-        let g1s: Vec<Bn254G1Affine> = vec![&env, neg_a, vk.alpha, vk_x, proof.c];
-        let g2s: Vec<Bn254G2Affine> = vec![&env, proof.b, vk.beta, vk.gamma, vk.delta];
-
-        let valid = bn254.pairing_check(g1s, g2s);
-
-        if !valid {
-            soroban_sdk::panic_with_error!(&env, VerifierError::InvalidProof);
-        }
-
-        // Increment the batch counter.
-        let count: u64 = env.storage().instance().get(&key_counter()).unwrap_or(0u64);
-        env.storage().instance().set(&key_counter(), &(count + 1));
-
-        // Emit an event so indexers can track verified batches.
-        // Topic: ("verify",)  Data: n_proofs
-        env.events().publish(
-            (soroban_sdk::symbol_short!("verify"),),
-            n_proofs,
-        );
-
-        true
+        // BN254 host functions are not available in soroban-sdk v22. The ABI and state
+        // management compile now; real pairing verification must be enabled once the SDK
+        // exposes g1_add/g1_mul/pairing_check bindings.
+        let _ = (proof, n_proofs);
+        soroban_sdk::panic_with_error!(&env, VerifierError::UnsupportedHostFunction);
     }
 
     // ── Read-only helpers ──────────────────────────────────────────────────────
